@@ -1,0 +1,148 @@
+---
+title: "Outlier Filtering"
+author: "Matthijs Vervaeck"
+date: "2024-05-20"
+output: html_document
+---
+
+```{r columns of interest}
+columns_of_interest <- c("loan_amount", "income", "property_value")
+```
+
+```{r function to filter outliers}
+adjust_and_filter_outliers_iqr <- function(data, desired_medians) {
+  for (col in names(desired_medians)) {
+    if (is.numeric(data[[col]])) {
+      current_median <- median(data[[col]], na.rm = TRUE)
+      desired_median <- desired_medians[[col]]
+      adjustment <- desired_median - current_median
+      
+      # Adjust the column to shift the median to the desired value
+      data[[col]] <- data[[col]] + adjustment
+      
+      # Calculate IQR and boundaries
+      Q1 <- quantile(data[[col]], 0.25, na.rm = TRUE)
+      Q3 <- quantile(data[[col]], 0.75, na.rm = TRUE)
+      IQR <- Q3 - Q1
+      lower_bound <- Q1 - 1.5 * IQR
+      upper_bound <- Q3 + 1.5 * IQR
+      
+      # Filter data
+      data <- data[data[[col]] >= lower_bound & data[[col]] <= upper_bound, ]
+    }
+  }
+  
+  retained_percentage <- (nrow(data) / 79746) * 100 # Use the original number of observations to calculate the retained percentage
+  return(list(clean_data = data, retained_percentage = retained_percentage))
+}
+```
+
+```{r changed medians}
+desired_medians <- list(
+  loan_amount = 340000,    # Desired median for loan amount
+  income = 74580,          # Desired median for income
+  property_value = 457475  # Desired median for property value
+)
+```
+
+```{r filtering data}
+iqr_result <- adjust_and_filter_outliers_iqr(f_usfs, desired_medians)
+clean_data_iqr <- iqr_result$clean_data
+retained_percentage_iqr <- iqr_result$retained_percentage
+```
+
+```{r making the filtered set}
+f_usfs <- clean_data_iqr
+```
+
+```{r splitting the dataset to trn + dev + tst with 80:10:10}
+set.seed(69)
+
+# Splitting training and testing sets
+trn_action_index <- createDataPartition(f_usfs$action_taken, p = 0.8, list = FALSE)
+trn_action_taken <- f_usfs[trn_action_index, ]
+tst_usfs <- f_usfs[-trn_action_index, ]
+
+# Splitting the dev set from the training set
+trn_action_index_final <- createDataPartition(trn_action_taken$action_taken, p = 0.75, list = FALSE)
+trn_usfs <- trn_action_taken[trn_action_index_final, ]
+dev_usfs <- trn_action_taken[-trn_action_index_final, ]
+
+# Checking if split correctly
+same_values_train_dev <- all(trn_usfs %in% dev_usfs)
+same_values_train_test <- all(trn_usfs %in% tst_usfs)
+same_values_dev_test <- all(dev_usfs %in% tst_usfs)
+
+```
+
+```{r Smote for trn set}
+smote_trn <- smote(action_taken ~., trn_usfs, perc.over = 2, k = 5, perc.under = 2)
+table(smote_trn$action_taken)
+```
+
+```{r Smote for dev set}
+smote_dev <- smote(action_taken ~., dev_usfs, perc.over = 2, k = 5, perc.under = 2)
+table(smote_dev$action_taken)
+```
+```{r mahalanobis filtering}
+filter_outliers_mahalanobis <- function(data, columns, threshold = 0.975) {
+  # Extract the specified columns
+  data_subset <- data[ , columns]
+  
+  # Calculate the Mahalanobis distance
+  mahalanobis_dist <- mahalanobis(data_subset, colMeans(data_subset, na.rm = TRUE), cov(data_subset, use = "complete.obs"))
+  
+  # Determine the threshold value from the chi-squared distribution
+  cutoff <- qchisq(threshold, df = ncol(data_subset))
+  
+  # Filter the data
+  data_filtered <- data[mahalanobis_dist <= cutoff, ]
+  
+  retained_percentage <- (nrow(data_filtered) / 79746) * 100
+  return(list(clean_data = data_filtered, retained_percentage = retained_percentage))
+}
+```
+
+```{r mahalanobis results}
+mahalanobis_result <- filter_outliers_mahalanobis(f_usfs, columns_of_interest)
+clean_data_mahalanobis <- mahalanobis_result$clean_data
+retained_percentage_mahalanobis <- mahalanobis_result$retained_percentage
+
+print(paste("Percentage of data retained after Mahalanobis filtering:", retained_percentage_mahalanobis))
+print("Cleaned data after Mahalanobis filtering:")
+print(head(clean_data_mahalanobis))
+```
+
+```{r making the filtered set}
+f_usfs2 <- as.data.frame(mahalanobis_result)
+```
+
+```{r splitting the dataset to trn + dev + tst with 80:10:10}
+set.seed(69)
+
+# Splitting training and testing sets
+trn_action_index2 <- createDataPartition(f_usfs2$clean_data.action_taken, p = 0.8, list = FALSE)
+trn_action_taken2 <- f_usfs[trn_action_index2, ]
+tst_usfs2 <- f_usfs[-trn_action_index2, ]
+
+# Splitting the dev set from the training set
+trn_action_index_final2 <- createDataPartition(trn_action_taken2$action_taken, p = 0.75, list = FALSE)
+trn_usfs2 <- trn_action_taken2[trn_action_index_final2, ]
+dev_usfs2 <- trn_action_taken2[-trn_action_index_final2, ]
+
+# Checking if split correctly
+same_values_train_dev <- all(trn_usfs %in% dev_usfs)
+same_values_train_test <- all(trn_usfs %in% tst_usfs)
+same_values_dev_test <- all(dev_usfs %in% tst_usfs)
+
+```
+
+```{r Smote for trn set}
+smote_trn2 <- smote(action_taken ~., trn_usfs2, perc.over = 2, k = 5, perc.under = 2)
+table(smote_trn2$action_taken)
+```
+
+```{r Smote for dev set}
+smote_dev2 <- smote(action_taken ~., dev_usfs2, perc.over = 2, k = 5, perc.under = 2)
+table(smote_dev2$action_taken)
+```

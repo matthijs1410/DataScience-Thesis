@@ -1,0 +1,231 @@
+---
+title: "Thesis code"
+author: "Matthijs Vervaeck"
+date: "2024-02-28"
+output: html_document
+---
+
+```{r loading libraries load., cache = FALSE}
+library(dplyr)
+library(ggplot2)
+library(caret)
+library(performanceEstimation)
+library(randomForest)
+library(ROCR)
+library(tidymodels)
+library(tune)         
+library(workflows)  
+library(tictoc)
+library(ranger)
+library(yardstick)
+library(h2o)
+library(rBayesianOptimization)
+library(pROC)
+library(lime)
+library(iml)
+library(tidyr)
+```
+
+```{r loading the usfs datasets., cache = FALSE}
+#usfs <- read.csv("input/usfs_cali.csv")
+```
+
+```{r action_taken plot., cache = FALSE}
+ggplot(data = usfs, aes(x = action_taken)) +
+geom_bar(fill = c("green", "red")) + 
+  scale_x_discrete(limits = c("1", "2"),
+                   labels = c("Approved", "Denied")) 
+```
+
+```{r conducting EDA., cache=FALSE}
+# Finding how many NAs in all the columns
+for (col in names(usfs)) {
+  na_count <- sum(is.na(usfs[[col]]))
+  cat("Column", col, ": Number of NA:", na_count, "\n")
+}
+
+```
+
+```{r filtering redundant columns usfs dataset., cache=FALSE}
+f_usfs <- subset(usfs, select = -c(activity_year, state_code, total_points_and_fees, lei,
+                                   census_tract,
+                                   prepayment_penalty_term, preapproval, applicant_ethnicity.3,
+                                   applicant_ethnicity.4,
+                                   co.applicant_ethnicity.3, co.applicant_ethnicity.4,
+                                   co.applicant_ethnicity.5,
+                                   applicant_race.3, applicant_race.5, applicant_race.4,
+                                   co.applicant_race.5, 
+                                   applicant_ethnicity.5,
+                                   co.applicant_race.3, co.applicant_race.4,
+                                   multifamily_affordable_units, aus.3, aus.4, aus.5))
+#These columns all had 100% NA and did not have correlation with any other missing values. Some of the other columns did have correlation with each other. In the next step there will be data imputation. In addition, all columns of multiple applicants were deleted, as most of these did not have instances.
+
+f_usfs$co.applicant_age_above_62[is.na(f_usfs$co.applicant_age_above_62)] <- "N/A"
+f_usfs$co.applicant_age[f_usfs$co.applicant_age == 9999] <- "N/A"
+#Such that the data can still be used, while the NA was there to show that there was no second applicant.
+
+#The income column needs to be multiplied by 1000, as this is the only column which does not show thousends
+f_usfs$income <- f_usfs$income * 1000
+#changing the value of denial to 2 instaed of 3
+f_usfs$action_taken[f_usfs$action_taken == 3] <- 0
+```
+
+```{r creating box and scatterplots, cache = FALSE}
+ggplot(f_usfs, aes(y = income)) +
+  geom_boxplot()
+ggplot(f_usfs, aes(y = property_value)) +
+  geom_boxplot()
+ggplot(f_usfs, aes(y = loan_amount)) +
+  geom_boxplot()
+ggplot(f_usfs, aes(x = income, y = property_value, color = loan_amount)) +
+  geom_point()
+ggplot(f_usfs, aes(x = loan_amount, y = income)) +
+  geom_point()
+```
+
+```{r filter for outliers, cache = FALSE}
+#filtering the dataset for outliers, which are either impossible or skew the data significantly
+f_usfs <- f_usfs %>%
+  filter(
+    income >= 0
+  )
+#Filtering columns where there were < 500 NAs
+column <- c("debt_to_income_ratio")
+f_usfs <- f_usfs[complete.cases(f_usfs[, column]), ]
+
+#converting columns to characters
+f_usfs$county_code <- as.character(f_usfs$county_code)
+```
+
+```{r finding column indices to convert to character, cache = FALSE}
+# the individual columns or ranges of these columns need to be converted to character
+column_names <- c("action_taken", "business_or_commercial_purpose", "hoepa_status", "negative_amortization",
+                             "other_nonamortizing_features", "construction_method",
+                             "manufactured_home_secured_property_type",
+                             "applicant_credit_score_type", "co.applicant_sex_observed", "submission_of_application", 
+                             "denial_reason.4")
+column_indices <- list()
+
+for (col_name in column_names) {
+  index <- which(colnames(f_usfs) == col_name)
+  column_indices[[col_name]] <- index
+}
+column_indices
+```
+
+```{r setting columns to character, cache = FALSE}
+# all numeric columns that don't have order to character
+f_usfs <- f_usfs %>%
+  mutate(across(c(1:2, 10:16,"hoepa_status", 28:31, 33:35, 40:57, 62:69), as.character))
+```
+
+```{r finding all variables with only 1 value, cache = FALSE}
+# Function to identify variables with only one level as logistic regression could not run with these columns
+find_single_level_vars <- function(f_usfs) {
+  single_level_vars <- character(0)  
+  
+  for (col in names(f_usfs)) {  
+    if (length(unique(f_usfs[[col]])) == 1) { 
+      single_level_vars <- c(single_level_vars, col)  
+    }
+  }
+  return(single_level_vars)  
+}
+
+find_single_level_vars(f_usfs)
+
+```
+
+```{r filtering out the columns with only 1 value, cache = FALSE}
+#Filtering out the columns with only 1 value and too many NAs
+f_usfs <- subset(f_usfs, select = -c(reverse_mortgage, negative_amortization,
+                                       balloon_payment, 
+                                       other_nonamortizing_features, submission_of_application,
+                                       applicant_race.2,
+                                       co.applicant_race.2, co.applicant_ethnicity.2,
+                                       applicant_ethnicity.2, 
+                                       intro_rate_period, aus.2,
+                                       co.applicant_race.2))
+```
+
+```{r filtering columns that don't have values for a_t = 2, cache = FALSE}
+# Filter out all the columns that do not have values, as the action_taken is 'denied' (which is 2). As there cannot be an interest rate or amount of discount points paid when there has been no origination of the mortgage itself.
+f_usfs <- subset(f_usfs, select = -c(interest_rate, rate_spread, total_loan_costs, origination_charges,
+                  discount_points, lender_credits))
+```
+
+```{r removing denial reason as these predict perfectly}
+f_usfs <- subset(f_usfs, select = -c(denial_reason.1 ,denial_reason.2, denial_reason.3, denial_reason.4, purchaser_type, hoepa_status))
+
+#Random Forest cannot handle categorical operators with more then 53 categories
+f_usfs <- subset(f_usfs, select = -c(county_code))
+```
+
+```{r removing variables regarding race or ethnicity}
+columns_to_remove <- grep("ethnicity", names(f_usfs), ignore.case = TRUE)
+
+f_usfs <- f_usfs[, -columns_to_remove]
+```
+
+```{r converting character to factor, cache = FALSE}
+#Converting all character columns into factors
+convert_char_to_factor <- function(data) {
+  for (col in names(data)) {
+    if (is.character(data[[col]])) {
+      data[[col]] <- factor(data[[col]])
+    }
+  }
+  return(data)
+}
+f_usfs <- convert_char_to_factor(f_usfs)
+```
+
+```{r adding labels to action taken, cache = FALSE}
+f_usfs$action_taken <- factor(f_usfs$action_taken, 
+                               levels = c(0, 1),
+                               labels = c("denied", "accepted"))
+```
+
+```{r changing reference levels}
+f_usfs <- f_usfs %>%
+  mutate(action_taken = relevel(action_taken, ref = "denied"))
+```
+
+```{r checking duplicates}
+f_usfs <- unique(f_usfs)
+```
+
+```{r splitting the dataset to trn + dev + tst with 80:10:10}
+set.seed(69)
+
+# Splitting training and testing sets
+trn_action_index <- createDataPartition(f_usfs$action_taken, p = 0.8, list = FALSE)
+trn_action_taken <- f_usfs[trn_action_index, ]
+tst_usfs <- f_usfs[-trn_action_index, ]
+
+# Splitting the dev set from the training set
+trn_action_index_final <- createDataPartition(trn_action_taken$action_taken, p = 0.75, list = FALSE)
+trn_usfs <- trn_action_taken[trn_action_index_final, ]
+dev_usfs <- trn_action_taken[-trn_action_index_final, ]
+
+# Checking if split correctly
+same_values_train_dev <- all(trn_usfs %in% dev_usfs)
+same_values_train_test <- all(trn_usfs %in% tst_usfs)
+same_values_dev_test <- all(dev_usfs %in% tst_usfs)
+
+```
+
+```{r Smote for trn set}
+smote_trn <- smote(action_taken ~., trn_usfs, perc.over = 2, k = 5, perc.under = 2)
+table(smote_trn$action_taken)
+```
+
+```{r Smote for dev set}
+smote_dev <- smote(action_taken ~., dev_usfs, perc.over = 2, k = 5, perc.under = 2)
+table(smote_dev$action_taken)
+```
+
+
+
+
+

@@ -1,0 +1,147 @@
+---
+title: "Multilayer Perceptron h2o"
+author: "Matthijs Vervaeck"
+date: "2024-05-16"
+output: html_document
+---
+
+```{r libraries}
+library(h2o)
+library(tidymodels)
+library(tictoc)
+library(agua)
+library(bit64)
+
+h2o.init()
+```
+
+```{r default mlp model}
+dl_model_default <- mlp(
+  mode = "classification",
+  hidden_units = 50,      
+  epochs = 50,            
+  learn_rate = 0.01       
+) %>%
+  set_engine("h2o", activation = "Tanh", loss = "CrossEntropy", adaptive_rate = FALSE)
+```
+
+```{r default mlp workflow}
+rec <- recipe(action_taken ~ ., data = smote_trn)
+
+dl_workflow_default <- workflow() %>%
+  add_model(dl_model_default) %>%
+  add_recipe(rec)
+```
+
+```{r default mlp fitting}
+set.seed(69)
+tic("Default model training")
+final_dl_fit_default <- fit(dl_workflow_default, data = smote_trn)
+toc()
+  
+```
+
+```{r default model predicting}
+predictions_default <- predict(final_dl_fit_default, new_data = tst_usfs, type = "prob") %>%
+  bind_cols(tst_usfs) %>%
+  mutate(pred_class = ifelse(.pred_denied > 0.5, "denied", "accepted"))
+
+```
+
+```{r default model evaluating}
+conf_matrix_default <- conf_mat(predictions_default, truth = action_taken, estimate = pred_class)
+accuracy_default <- accuracy(predictions_default, truth = action_taken, estimate = pred_class)
+precision_default <- precision(predictions_default, truth = action_taken, estimate = pred_class)
+recall_default <- recall(predictions_default, truth = action_taken, estimate = pred_class)
+mcc_default <- mcc(predictions_default, truth = action_taken, estimate = pred_class)
+
+cat("Default Model Evaluation Metrics:\n")
+print(conf_matrix_default)
+print(accuracy_default)
+print(precision_default)
+print(recall_default)
+print(mcc_default)
+```
+
+```{r defining hyperparameters to tune}
+dl_model_tuned <- mlp(
+  mode = "classification",
+  hidden_units = tune(),  # Tune the number of hidden units
+  epochs = tune(),        # Tune the number of epochs
+  learn_rate = tune()     # Tune the learning rate
+) %>%
+  set_engine("h2o", activation = "Tanh", loss = "CrossEntropy", adaptive_rate = FALSE)
+
+```
+
+```{r tuned mlp workflow}
+dl_workflow_tuned <- workflow() %>%
+  add_model(dl_model_tuned) %>%
+  add_recipe(rec)
+```
+
+```{r define the grid tuned mlp}
+dl_grid <- grid_latin_hypercube(
+  hidden_units(range = c(10, 200)),
+  epochs(range = c(10, 200)),
+  learn_rate(range = c(0.001, 0.1)),
+  size = 10
+)
+
+```
+
+```{r performing bayesian optimization}
+folds <- vfold_cv(smote_trn, v = 5, repeats = 2)
+
+set.seed(69)
+tic("Bayesian optimization MLP")
+dl_search_results <- tune_bayes(
+  dl_workflow_tuned,
+  resamples = folds,
+  param_info = dl_grid,
+  initial = 5,
+  iter = 7,
+  metrics = metric_set(accuracy),
+  control = control_bayes(no_improve = 8,
+                          save_pred = TRUE,
+                          verbose = TRUE)
+)
+toc()
+```
+
+```{r fitting tuned model}
+# Select the best hyperparameters
+best_params <- select_best(dl_search_results, "accuracy")
+
+# Finalize the workflow with the best hyperparameters
+final_dl_workflow_tuned <- finalize_workflow(dl_workflow_tuned, best_params)
+
+# Fit the final tuned model
+set.seed(69)
+tic("Tuned model training")
+final_dl_fit_tuned <- fit(final_dl_workflow_tuned, data = smote_trn)
+toc()
+
+```
+
+```{r predicting tuned model}
+predictions_tuned <- predict(final_dl_fit_tuned, new_data = tst_usfs, type = "prob") %>%
+  bind_cols(tst_usfs) %>%
+  mutate(pred_class = ifelse(.pred_denied > 0.5, "denied", "approved"))
+```
+
+```{r evaluating}
+# Evaluate the tuned model
+conf_matrix_tuned <- conf_mat(predictions_tuned, truth = action_taken, estimate = pred_class)
+accuracy_tuned <- accuracy(predictions_tuned, truth = action_taken, estimate = pred_class)
+precision_tuned <- precision(predictions_tuned, truth = action_taken, estimate = pred_class)
+recall_tuned <- recall(predictions_tuned, truth = action_taken, estimate = pred_class)
+mcc_tuned <- mcc(predictions_tuned, truth = action_taken, estimate = pred_class)
+
+cat("Tuned Model Evaluation Metrics:\n")
+print(conf_matrix_tuned)
+print(accuracy_tuned)
+print(precision_tuned)
+print(recall_tuned)
+print(mcc_tuned)
+```

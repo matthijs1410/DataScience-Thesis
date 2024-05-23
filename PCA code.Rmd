@@ -1,0 +1,125 @@
+---
+title: "PCA"
+author: "Matthijs Vervaeck"
+date: "2024-05-19"
+output: html_document
+---
+
+```{r libraries}
+library(dplyr)
+library(tidyr)
+library(caret)
+library(ggplot2)
+library(factoextra)
+library(paran)
+```
+
+```{r excluding at}
+data_pca <- f_usfs %>%
+  dplyr::select(-action_taken)
+```
+
+```{r converting variables}
+data_pca <- dummyVars("~ .", data = data_pca, fullRank = TRUE) %>%
+  predict(f_usfs) %>%
+  as.data.frame()
+data_pca_scaled <- scale(data_pca)
+
+```
+
+```{r performing PCA}
+pca_result <- prcomp(data_pca_scaled, center = TRUE, scale. = TRUE)
+```
+
+```{r summary of PCA}
+summary(pca_result)
+```
+
+```{r Scree plot  PCA}
+fviz_eig(pca_result, addlabels = TRUE, ylim = c(0, 50))
+```
+
+```{r cumulative explained variance PCA}
+explained_variance <- cumsum(pca_result$sdev^2 / sum(pca_result$sdev^2))
+
+# Determine the number of components for different variance thresholds
+thresholds <- c(0.70, 0.80, 0.85, 0.90)
+
+num_components <- sapply(thresholds, function(thresh) which(explained_variance >= thresh)[1])
+names(num_components) <- paste0(thresholds * 100, "% Variance")
+
+print(num_components)
+```
+
+```{r Kaiser criterion PCA}
+eigenvalues <- pca_result$sdev^2
+num_components_kaiser <- sum(eigenvalues > 1)
+num_components_kaiser
+```
+
+
+```{r parallel analysis PCA}
+paran_result <- paran(data_pca_scaled, iterations = 500, centile = 95)
+```
+
+
+```{r }
+adjusted_eigenvalues <- paran_result$AdjEv
+simulated_eigenvalues <- paran_result$SimEvs
+
+num_components <- length(adjusted_eigenvalues)
+iterations <- length(simulated_eigenvalues) / num_components
+mean_simulated_eigenvalues <- colMeans(matrix(simulated_eigenvalues, nrow = iterations, byrow = TRUE))
+
+print(length(mean_simulated_eigenvalues))
+
+summary_table <- data.frame(
+  Component = 1:num_components,
+  Adjusted_Eigenvalues = adjusted_eigenvalues,
+  Mean_Simulated_Eigenvalues = mean_simulated_eigenvalues
+)
+
+# Determine the number of significant components
+num_significant_components <- sum(adjusted_eigenvalues > mean_simulated_eigenvalues)
+
+# Print the number of significant components
+print(num_significant_components)
+
+# Optionally, print the summary table for reference
+print(summary_table)
+```
+
+
+```{r }
+#we retain 78 components, as this is close to the 76 of the kaiser component analysis and this still retains 80% of the variance while reducing dimensionality.
+
+num_components_to_retain <- 78
+pca_usfs <- pca_result$x[, 1:num_components_to_retain]
+
+pca_usfs <- as.data.frame(pca_usfs)
+
+pca_usfs$action_taken <- f_usfs$action_taken
+```
+
+```{r splitting PCA data}
+trn_action_index <- createDataPartition(pca_usfs$action_taken, p = 0.8, list = FALSE)
+trn_action_taken <- pca_usfs[trn_action_index, ]
+tst_usfs <- pca_usfs[-trn_action_index, ]
+
+# Splitting the development set from the training set: 75% for final training, 25% for development
+trn_action_index_final <- createDataPartition(trn_action_taken$action_taken, p = 0.75, list = FALSE)
+trn_usfs <- trn_action_taken[trn_action_index_final, ]
+dev_usfs <- trn_action_taken[-trn_action_index_final, ]
+
+```
+
+
+```{r SMOTE PCA training set}
+smote_trn <- smote(action_taken ~., trn_usfs, perc.over = 2, k = 5, perc.under = 2)
+table(smote_trn$action_taken)
+```
+
+```{r SMOTE PCA development set}
+smote_dev <- smote(action_taken ~., dev_usfs, perc.over = 2, k = 5, perc.under = 2)
+table(smote_dev$action_taken)
+```
